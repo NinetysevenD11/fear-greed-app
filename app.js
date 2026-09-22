@@ -30,6 +30,8 @@ function normalizeDate(raw) {
   if (m) return m[1] + "-" + pad(m[2]) + "-" + pad(m[3]);
   m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (m) return m[1] + "-" + m[2] + "-" + m[3];
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + "-" + pad(m[1]) + "-" + pad(m[2]);
   return "";
 }
 async function fetchFirst(urls) {
@@ -89,11 +91,12 @@ function parseQqqCsv(text) {
   const rows = [];
   const lines = text.trim().split(/\r?\n/).filter(Boolean);
   if (!lines.length) return rows;
-  const heads = lines[0].toLowerCase().split(",").map(function(h) { return h.trim(); });
+  const sep = lines[0].indexOf("\t") >= 0 ? "\t" : ",";
+  const heads = lines[0].toLowerCase().split(sep).map(function(h) { return h.trim(); });
   let closeIdx = heads.indexOf("close");
   if (closeIdx < 0) closeIdx = 1;
   for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i].split(",");
+    const parts = lines[i].split(sep);
     const date = normalizeDate(parts[0]);
     const close = Number(parts[closeIdx] || parts[1]);
     if (!date || !Number.isFinite(close)) continue;
@@ -117,10 +120,13 @@ function parseYahooChart(raw) {
   return attachRsi(rows);
 }
 async function loadQqq() {
+  const qqqFiles = [
+    "https://cdn.jsdelivr.net/gh/bumbeishvili/tqqq.networthcast.com@main/data/synthetic-qqq.tsv",
+    "https://raw.githubusercontent.com/bumbeishvili/tqqq.networthcast.com/main/data/synthetic-qqq.tsv"
+  ];
   const tries = [
-    async function() { return parseYahooChart(await fetchFirst(["https://api.allorigins.win/raw?url=" + encodeURIComponent(QQQ_YAHOO)])); },
-    async function() { return parseYahooChart(await fetchFirst(["https://corsproxy.io/?" + encodeURIComponent(QQQ_YAHOO)])); },
-    async function() { return parseQqqCsv(await fetchFirst(["https://api.allorigins.win/raw?url=" + encodeURIComponent("https://stooq.com/q/d/l/?s=qqq.us&i=d")])); }
+    async function() { return parseQqqCsv(await fetchFirst(qqqFiles)); },
+    async function() { return parseYahooChart(await fetchFirst(["https://api.allorigins.win/raw?url=" + encodeURIComponent(QQQ_YAHOO)])); }
   ];
   let last;
   for (let i = 0; i < tries.length; i++) {
