@@ -1,5 +1,9 @@
-const FG_URL = "https://raw.githubusercontent.com/whit3rabbit/fear-greed-data/main/fear-greed.csv";
-const QQQ_BACKUP = "https://raw.githubusercontent.com/NinetysevenD11/fear-greed-app/main/qqq.csv";
+const FG_URLS = [
+  "https://cdn.jsdelivr.net/gh/whit3rabbit/fear-greed-data@main/fear-greed.csv",
+  "https://raw.githubusercontent.com/whit3rabbit/fear-greed-data/main/fear-greed.csv",
+  "https://api.allorigins.win/raw?url=" + encodeURIComponent("https://raw.githubusercontent.com/whit3rabbit/fear-greed-data/main/fear-greed.csv")
+];
+const QQQ_YAHOO = "https://query2.finance.yahoo.com/v8/finance/chart/QQQ?interval=1d&range=15y";
 const MAP = {
   "extreme fear": { ko: "극단적 공포", color: "#e53935" },
   "fear": { ko: "공포", color: "#fb8c00" },
@@ -26,12 +30,20 @@ function normalizeDate(raw) {
   if (m) return m[1] + "-" + pad(m[2]) + "-" + pad(m[3]);
   m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (m) return m[1] + "-" + m[2] + "-" + m[3];
-  m = s.match(/^(\d{2,4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?$/);
-  if (m) {
-    const y = m[1].length === 2 ? "20" + m[1] : m[1];
-    return y + "-" + pad(m[2]) + "-" + pad(m[3]);
-  }
   return "";
+}
+async function fetchFirst(urls) {
+  let last = new Error("주소를 모두 실패했습니다.");
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      const res = await fetch(urls[i], { cache: "no-store" });
+      if (!res.ok) { last = new Error("HTTP " + res.status); continue; }
+      const text = await res.text();
+      if (!text || text.length < 20) { last = new Error("빈 응답"); continue; }
+      return text;
+    } catch (e) { last = e; }
+  }
+  throw last;
 }
 function parseFg(text) {
   const rows = [];
@@ -76,17 +88,22 @@ function attachRsi(rows) {
 function parseQqqCsv(text) {
   const rows = [];
   const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return rows;
+  const heads = lines[0].toLowerCase().split(",").map(function(h) { return h.trim(); });
+  let closeIdx = heads.indexOf("close");
+  if (closeIdx < 0) closeIdx = 1;
   for (let i = 1; i < lines.length; i++) {
     const parts = lines[i].split(",");
     const date = normalizeDate(parts[0]);
-    const close = Number(parts[1]);
+    const close = Number(parts[closeIdx] || parts[1]);
     if (!date || !Number.isFinite(close)) continue;
     rows.push({ date: date, close: close });
   }
   rows.sort(function(a, b) { return a.date.localeCompare(b.date); });
   return attachRsi(rows);
 }
-function parseYahooChart(json) {
+function parseYahooChart(raw) {
+  const json = typeof raw === "string" ? JSON.parse(raw) : raw;
   const result = json && json.chart && json.chart.result && json.chart.result[0];
   if (!result) throw new Error("QQQ 응답이 비어 있습니다.");
   const ts = result.timestamp || [];
@@ -95,40 +112,28 @@ function parseYahooChart(json) {
   for (let i = 0; i < ts.length; i++) {
     if (closes[i] == null) continue;
     const d = new Date(ts[i] * 1000);
-    const date = d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
-    rows.push({ date: date, close: Number(closes[i]) });
+    rows.push({ date: d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()), close: Number(closes[i]) });
   }
   return attachRsi(rows);
 }
-async function fetchText(url) {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  return res.text();
-}
-async function fetchJson(url) {
-  const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  return res.json();
-}
 async function loadQqq() {
-  const yahoo = "https://query2.finance.yahoo.com/v8/finance/chart/QQQ?interval=1d&range=15y";
   const tries = [
-    function() { return fetchJson(yahoo).then(parseYahooChart); },
-    function() { return fetchJson("https://api.allorigins.win/raw?url=" + encodeURIComponent(yahoo)).then(parseYahooChart); },
-    function() { return fetchJson("https://corsproxy.io/?" + encodeURIComponent(yahoo)).then(parseYahooChart); },
-    function() { return fetchText(QQQ_BACKUP + "?t=" + Date.now()).then(parseQqqCsv); }
+    async function() { return parseYahooChart(await fetchFirst(["https://api.allorigins.win/raw?url=" + encodeURIComponent(QQQ_YAHOO)])); },
+    async function() { return parseYahooChart(await fetchFirst(["https://corsproxy.io/?" + encodeURIComponent(QQQ_YAHOO)])); },
+    async function() { return parseQqqCsv(await fetchFirst(["https://api.allorigins.win/raw?url=" + encodeURIComponent("https://stooq.com/q/d/l/?s=qqq.us&i=d")])); }
   ];
-  let lastErr;
+  let last;
   for (let i = 0; i < tries.length; i++) {
-    try { return await tries[i](); } catch (e) { lastErr = e; }
+    try { return await tries[i](); } catch (e) { last = e; }
   }
-  throw lastErr || new Error("QQQ 데이터를 가져오지 못했습니다.");
+  throw last || new Error("QQQ 실패");
 }
 function mergeQqq(fgRows, qqqRows) {
+  if (!qqqRows || !qqqRows.length) return;
   const map = new Map(qqqRows.map(function(r) { return [r.date, r]; }));
+  const dates = qqqRows.map(function(r) { return r.date; });
   function nearest(date) {
     if (map.has(date)) return map.get(date);
-    const dates = qqqRows.map(function(r) { return r.date; });
     let lo = 0, hi = dates.length - 1, ans = -1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
@@ -224,7 +229,7 @@ function render() {
           '<div class="qqq-line">QQQ ' + fmtPx(r.close) + ' · RSI ' + fmtRsi(r.rsi) + '</div></div>' +
           '<div class="row-right">' + fmt(r.score) + ' · ' + m.ko + '</div></div>';
       }).join("") +
-      '</section><p class="hint">RSI는 QQQ 종가 기준 14일 Wilder 방식입니다. 70 이상은 과매수, 30 이하는 과매도로 색을 구분합니다. QQQ는 Yahoo Finance 일봉입니다.</p>';
+      '</section><p class="hint">RSI는 QQQ 종가 기준 14일 Wilder 방식입니다.</p>';
   drawChart(document.getElementById("chart"), chartRows, cur.date);
   document.querySelectorAll(".row[data-date]").forEach(function(el) {
     el.addEventListener("click", function() {
@@ -245,29 +250,36 @@ function searchDate() {
   SELECTED = date;
   render();
 }
+function goLatest() {
+  SELECTED = ALL.length ? ALL[ALL.length - 1].date : "";
+  if (ALL.length) render();
+}
 async function load() {
   const app = document.getElementById("app");
-  app.innerHTML = '<p class="hint">공포탐욕 지수와 QQQ를 불러오는 중…</p>';
+  app.innerHTML = '<p class="hint">불러오는 중…</p>';
   try {
-    const pair = await Promise.all([fetchText(FG_URL + "?t=" + Date.now()), loadQqq()]);
-    ALL = parseFg(pair[0]);
-    mergeQqq(ALL, pair[1]);
-    if (!ALL.length) throw new Error("데이터가 비어 있습니다.");
+    ALL = parseFg(await fetchFirst(FG_URLS));
+    if (!ALL.length) throw new Error("공포탐욕 데이터가 비어 있습니다.");
     const last = ALL[ALL.length - 1].date;
     document.getElementById("datePick").min = ALL[0].date;
     document.getElementById("datePick").max = last;
     if (!SELECTED) SELECTED = last;
     render();
   } catch (e) {
-    app.innerHTML = '<div class="err">데이터를 불러오지 못했습니다. HTML 미리보기 또는 GitHub Pages 주소로 열어 주세요.<br><br>' + e.message + '</div>';
+    app.innerHTML = '<div class="err">공포탐욕 데이터를 불러오지 못했습니다.<br><br>' + e.message + '</div>';
+    return;
+  }
+  try {
+    mergeQqq(ALL, await loadQqq());
+    render();
+  } catch (e) {
+    const note = document.getElementById("note");
+    if (note) note.textContent = "지수는 불러왔지만 QQQ는 아직 연결되지 않았습니다.";
   }
 }
 document.getElementById("reload").addEventListener("click", load);
 document.getElementById("searchBtn").addEventListener("click", searchDate);
-document.getElementById("todayBtn").addEventListener("click", function() {
-  SELECTED = ALL.length ? ALL[ALL.length - 1].date : "";
-  render();
-});
+document.getElementById("todayBtn").addEventListener("click", goLatest);
 document.getElementById("datePick").addEventListener("change", function() {
   document.getElementById("dateText").value = document.getElementById("datePick").value;
   searchDate();
